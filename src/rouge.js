@@ -4,7 +4,9 @@ import RougeFactory from 'rouge-protocol-solidity/build/contracts/RougeFactory.j
 import SimpleRougeCampaign from 'rouge-protocol-solidity/build/contracts/SimpleRougeCampaign.json'
 
 import { RougeProtocolAddress, RougeAuthorization } from './constants'
-import { universalAccount, universalScheme, sendTransaction, transact, successfulTransact } from './utils'
+import { universalAccount, universalScheme, sendTransaction, transact, successfulTransact } from './internalUtils'
+
+import RougeUtils from './utils'
 
 import Campaign from './campaign'
 
@@ -31,14 +33,22 @@ const defaultContext = {
 function RougeProtocol (web3, context = {}) {
   context = { ...defaultContext, ...context }
 
-  /* TODO better check valid web3 */
-  if (!/^1./.test(web3.version)) {
-    throw new Error('beta rouge.js can only be used with web3js 1.x')
+  if (!web3) {
+    throw new Error('RougeProtocol: please provide Web3.js context to initiate')
   }
 
+  if (web3.fromWei && web3.fromWei) {
+    web3 = { version: '1.utilsOnly', utils: web3 }
+  }
+
+  if (!/^1./.test(web3.version)) {
+    throw new Error('rouge.js: can only be used with web3js 1.x')
+  }
+
+  const _utils = () => RougeUtils(web3.utils)
   const _transact = (...args) => transact(web3, context, ...args)
 
-  const RGE$address = async () => RougeProtocolAddress[await web3.eth.net.getId()].rge
+  const RGE$address = async () => (context.rge || RougeProtocolAddress[await web3.eth.net.getId()].rge)
   const RGE$web3instance = async () => new web3.eth.Contract(RGEToken.abi, await RGE$address(), {})
   const RGE$balanceOf = async address => (await RGE$web3instance()).methods.balanceOf(address).call()
 
@@ -71,7 +81,7 @@ function RougeProtocol (web3, context = {}) {
     // TODO check event SetFactory(address indexed _rge, uint256 _tare) => store first block active factory
   }
 
-  control()
+  if (web3.net) control()
 
   const _AbiEvents = {}
   RougeFactory.abi.reduce((acc, d) => {
@@ -83,7 +93,14 @@ function RougeProtocol (web3, context = {}) {
     return acc
   }, _AbiEvents)
 
-  const _decodeLog = (name, log) => web3.eth.abi.decodeLog(_AbiEvents[name].inputs, log.data, log.topics.slice(1))
+  const _decodeLog = (name, log) => ({
+    _event: name,
+    _address: log.address,
+    _blockNumber: log.blockNumber,
+    _transactionHash: log.transactionHash,
+    _log: log,
+    ...web3.eth.abi.decodeLog(_AbiEvents[name].inputs, log.data, log.topics.slice(1))
+  })
 
   const account$ = () => Object.freeze({
     get address () { return context.as.address }
@@ -92,17 +109,14 @@ function RougeProtocol (web3, context = {}) {
 
   const campaign$ = address => Campaign(web3, address, { context, _decodeLog })
 
-  const createCampaign = async ({
-    issuance = 1,
-    tokens,
-    scheme = context.scheme,
-    ...args
-  }) => {
+  const createCampaign = async (params = {}) => {
+    if (!params.issuance) params.issuance = 1
+    if (!params.tokens) {
+      const tare = web3.utils.toBN(await factory$tare())
+      params.tokens = web3.utils.toBN(params.issuance).mul(tare)
+    }
+    const { issuance, tokens, scheme, ...args } = { scheme: context.scheme, ...params }
     try {
-      if (!tokens) {
-        const tare = web3.utils.toBN(await factory$tare())
-        tokens = web3.utils.toBN(issuance).mul(tare)
-      }
       // always check if enough token ? only if check options
       // check enought RGE
       const method = (await RGE$web3instance()).methods.newCampaign(issuance, tokens.toString())
@@ -116,34 +130,30 @@ function RougeProtocol (web3, context = {}) {
       const NewCampaign = _decodeLog('NewCampaign', receipt.logs[3])
       // console.log('NewCampaign', NewCampaign)
 
-      if (!successfulTransact(receipt)) Promise.reject(new Error(`[rouge.js] createCampaign tx failed`))
+      if (!successfulTransact(receipt)) throw new Error('tx failed')
 
       const campaign = campaign$(NewCampaign.campaign)
-      await campaign.issue({ scheme, ...args })
-
-      return Promise.resolve(campaign)
+      return await campaign.issue({ scheme, ...args })
     } catch (e) {
-      return Promise.reject(new Error(`[rouge.js] createCampaign failed: ${e}`))
+      throw new Error(`[rouge.js] createCampaign failed: ${e}`)
     }
   }
 
-  const getCampaignList = async ({scheme, issuer}) => {
+  // const getCampaignList = async ({issuer}) => {
+  // // NewCampaign TODO add in protocol issuer + version protocol
+  // TODO add in protocol issuer + version protocol
+  const getIssuedCampaignList = async ({scheme, issuer}) => {
+    // TODO issuer // protocol version filter
     try {
-      // const logs = await web3.eth.getPastLogs({
-      //   address: factoryAddress,
-      //   // event NewCampaign(address indexed issuer, address indexed campaign, uint32 issuance)
-      //   topics: ['0x798fca4db5588d669d44c689c1949dc5566b003ef1d73792336bb11e46143085']
-      // })
-      // scheme should be in topics.
+      const abiSignEvent = web3.eth.abi.encodeEventSignature(_AbiEvents['Issuance'])
+      const encodedScheme = web3.utils.padRight(scheme, 64)
       const logs = await web3.eth.getPastLogs({
-        fromBlock: 4056827, // should be factory/version create block by default
-        // address: factoryAddress,
-        // event Issuance(bytes4 scheme, string name, uint campaignExpiration) => add issuer + version
-        topics: ['0x61d7bd1b44357bca3ed4bd238fec71f1710af7c589ab829be7f3be96caa6c5eb']
+        fromBlock: 1, // 4056827, should be factory/version create block by default per network ?
+        topics: [abiSignEvent, encodedScheme]
       })
-      return Promise.resolve(logs.map(log => log.address))
+      return Promise.resolve(logs.map(log => _decodeLog('Issuance', log)))
     } catch (e) {
-      return Promise.reject(new Error(`[rouge.js] getCampaignList failed: ${e}`))
+      return Promise.reject(new Error(`[rouge.js] getIssuedCampaignList failed: ${e}`))
     }
   }
 
@@ -163,6 +173,7 @@ function RougeProtocol (web3, context = {}) {
   }
 
   const $ = {
+    get util$ () { return _utils() },
     // get options$$ () { return context.options },
     // protocol object with properties (non Promise & end with $) // no blockchain mutation & no pipe
     get AUTH$ () { return RougeAuthorization },
@@ -172,7 +183,8 @@ function RougeProtocol (web3, context = {}) {
     campaign$,
     // verb => potential mutation, always return Promise, pipe always end
     createCampaign,
-    getCampaignList,
+    // getCampaignList,
+    getIssuedCampaignList,
     sendFinney
   }
 
@@ -204,6 +216,7 @@ function RougeProtocol (web3, context = {}) {
     return $
   }
 
+  $.version = '__version__'
   return Object.freeze($).as(context.as)
 }
 

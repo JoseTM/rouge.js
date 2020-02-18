@@ -1,11 +1,10 @@
 
-import abi from 'ethereumjs-abi'
-
 import SimpleRougeCampaign from 'rouge-protocol-solidity/build/contracts/SimpleRougeCampaign.json'
 
-import { universalAccount, transact, successfulTransact } from './utils'
-import { authHash, authHashProtocolSig } from './authUtils'
+import { universalAccount, transact, successfulTransact } from './internalUtils'
 import { RougeAuthorization } from './constants'
+
+import RougeUtils from './utils'
 
 export default function Campaign (web3, address, { context, _decodeLog }) {
 
@@ -17,18 +16,42 @@ export default function Campaign (web3, address, { context, _decodeLog }) {
   const tare = async () => instance.methods.tare().call()
 
   // TODO cache information from getInfo
-  const info = async () => instance.methods.getInfo().call()
+  const infoRaw = async () => instance.methods.getInfo().call()
   const issuer = async () => instance.methods.issuer().call()
   const scheme = async () => instance.methods.scheme().call()
   const expiration = async () => instance.methods.campaignExpiration().call()
   const name = async () => instance.methods.name().call()
 
-  const state = async () => instance.methods.getState().call()
+  const info = async () => {
+    const data = await infoRaw()
+    return {
+      issuer: web3.utils.toChecksumAddress(data.slice(0, 42)),
+      scheme: '0x' + data.slice(42, 50),
+      expiration: web3.utils.hexToNumber('0x' + data.slice(50, 114)),
+      name: web3.utils.hexToAscii('0x' + data.slice(114))
+    }
+  }
+
+  const stateRaw = async () => instance.methods.getState().call()
   const isIssued = async () => instance.methods.campaignIssued().call()
   const issuance = async () => instance.methods.issuance().call()
   const available = async () => instance.methods.available().call()
   const acquired = async () => instance.methods.acquired().call()
   const redeemed = async () => instance.methods.redeemed().call()
+
+  const state = async () => {
+    const data = await stateRaw()
+    const result = {
+      issued: web3.utils.hexToNumber('0x' + data.slice(10, 12)) > 0
+    }
+    if (result.issued) {
+      result.issuance = web3.utils.hexToNumber(data.slice(0, 10))
+      result.free = web3.utils.hexToNumber('0x' + data.slice(12, 20))
+      result.acquired = web3.utils.hexToNumber('0x' + data.slice(20, 28))
+      result.redeemed = web3.utils.hexToNumber('0x' + data.slice(28, 36))
+    }
+    return result
+  }
 
   const _isAuthorized = async (address, auth) => (await instance.methods.isAuthorized(
     address, RougeAuthorization.All
@@ -65,14 +88,8 @@ export default function Campaign (web3, address, { context, _decodeLog }) {
   const addAttestor = async ({attestor, auths}) => {
     try {
       attestor = universalAccount(web3, attestor)
-      // XXX check syntax attestor + auths
       const method = instance.methods.addAttestor(attestor.address, auths)
-      // ! BUG in web3 1.0 (instance.abiModel.abi.methods.addAttestor) doesn't include Array
-      const encoded = '0x' + abi.simpleEncode(
-        'addAttestor(address,uint8[])', attestor.address, auths
-      ).toString('hex')
-
-      const receipt = await _transact(method, address, 46842, encoded)
+      const receipt = await _transact(method, address)
       if (!successfulTransact(receipt)) throw new Error('tx not successful')
       return Promise.resolve(true)
     } catch (e) {
@@ -83,14 +100,8 @@ export default function Campaign (web3, address, { context, _decodeLog }) {
   const removeAttestor = async ({attestor, auths}) => {
     try {
       attestor = universalAccount(web3, attestor)
-      // XXX check syntax attestor + auths
       const method = instance.methods.removeAttestor(attestor.address, auths)
-      // ! BUG in web3 1.0 (instance.abiModel.abi.methods.addAttestor) doesn't include Array
-      const encoded = '0x' + abi.simpleEncode(
-        'addAttestor(address,uint8[])', attestor.address, auths
-      ).toString('hex')
-
-      const receipt = await _transact(method, address, 46842, encoded)
+      const receipt = await _transact(method, address)
       if (!successfulTransact(receipt)) throw new Error('tx not successful')
       return Promise.resolve(true)
     } catch (e) {
@@ -112,26 +123,23 @@ export default function Campaign (web3, address, { context, _decodeLog }) {
   }) => {
     try {
       let method
-      let encoded
+      // let encoded
       // check expiration
       // TODO check attestor & grant syntax/rules
       if (attestor && auths) {
-        encoded = '0x' + abi.simpleEncode(
-          'issueWithAttestor(bytes4,string,uint,address,uint8[])', scheme, name, expiration, attestor, auths
-        ).toString('hex')
+        // encoded = '0x' + abi.simpleEncode(
+        //   'issueWithAttestor(bytes4,string,uint,address,uint8[])', scheme, name, expiration, attestor, auths
+        // ).toString('hex')
         method = instance.methods.issueWithAttestor(scheme, name, expiration, attestor, auths)
       } else {
         method = instance.methods.issue(scheme, name, expiration)
       }
 
-      const receipt = await _transact(method, address, null, encoded)
-
-      // const Issuance = _decodeLog('Issuance', receipt2.logs[0])
-      // console.log("Issuance", Issuance)
-
-      return Promise.resolve(receipt)
+      const receipt = await _transact(method, address)
+      // const Issuance = _decodeLog('Issuance', receipt.logs[0])
+      return receipt
     } catch (e) {
-      return Promise.reject(new Error(`[rouge.js] issueCampaign failed: ${e}`))
+      throw new Error(`[rouge.js] issueCampaign failed: ${e}`)
     }
   }
 
@@ -153,7 +161,7 @@ export default function Campaign (web3, address, { context, _decodeLog }) {
     try {
       // TODO test attestor != as if (rouge.validationMode)
       // TODO test attestor canDistribute if (rouge.validationMode)
-      const auth = authHash('acceptAcquisition', address, context.as.address)
+      const auth = RougeUtils(web3.utils).authHash('acceptAcquisition', address, context.as.address)
       const method = instance.methods.acquire(auth, signedAuth.v, signedAuth.r, signedAuth.s, attestor)
       const receipt = await _transact(method, address)
       if (!successfulTransact(receipt)) throw new Error('tx not successful')
@@ -168,7 +176,7 @@ export default function Campaign (web3, address, { context, _decodeLog }) {
       attestor = universalAccount(web3, attestor)
       // TODO test attestor != as if (rouge.validationMode)
       // TODO test attestor canRedeem if (rouge.validationMode)
-      const auth = authHash('acceptRedemption', address, context.as.address)
+      const auth = RougeUtils(web3.utils).authHash('acceptRedemption', address, context.as.address)
       const method = instance.methods.redeem(auth, signedAuth.v, signedAuth.r, signedAuth.s, attestor.address)
       const receipt = await _transact(method, address)
       // console.log(receipt)
@@ -182,7 +190,7 @@ export default function Campaign (web3, address, { context, _decodeLog }) {
   const acceptRedemption = async (bearer, signedAuth) => {
     try {
       bearer = universalAccount(web3, bearer)
-      const auth = authHash('acceptRedemption', address, bearer.address)
+      const auth = RougeUtils(web3.utils).authHash('acceptRedemption', address, bearer.address)
       const method = instance.methods.acceptRedemption(auth, signedAuth.v, signedAuth.r, signedAuth.s, bearer.address)
       const receipt = await _transact(method, address)
       // console.log(receipt)
@@ -207,7 +215,7 @@ export default function Campaign (web3, address, { context, _decodeLog }) {
   const _generateSignedAuth = (message, account) => {
     account = universalAccount(web3, account)
     // if context.as == account throw
-    return authHashProtocolSig(message, address, account.address, context.as.privateKey)
+    return RougeUtils(web3.utils).authHashProtocolSig(message, address, account.address, context.as.privateKey)
   }
 
   const $ = {
