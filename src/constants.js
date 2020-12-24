@@ -22,7 +22,7 @@ export const RougeProtocolAddress = {
     rge: '0x96Cd136F1aFB1f8934E6Cb6495Eaf24140f70325'
   },
    3: {
-    rge: '0x32C3f2Ca80677Ccb67AB393d4a2429f47c94A3f3'
+    rge: '0x3D4d6B701376E37C599B70FF8fad2C2D9C05DC8B'
   },
   77: {
     rge: '0x5475300766433dd082a7340fc48a445c483df68f'
